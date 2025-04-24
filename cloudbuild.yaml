@@ -1,0 +1,34 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "buildx",
+        "build",
+        "--platform=linux/amd64",
+        "--push",
+        "-t",
+        "gcr.io/flaskhelloworldapp-457805/flask-app:$COMMIT_SHA",
+        ".",
+      ]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: "gcloud"
+    args:
+      [
+        "run",
+        "deploy",
+        "lstm-app",
+        "--image",
+        "gcr.io/flaskhelloworldapp-457805/flask-app:$COMMIT_SHA",
+        "--region",
+        "us-central1",
+        "--platform",
+        "managed",
+        "--allow-unauthenticated",
+      ]
+
+images:
+  - "gcr.io/flaskhelloworldapp-457805/flask-app:$COMMIT_SHA"
