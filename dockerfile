@@ -1,20 +1,20 @@
-# Use the official lightweight Python image
-FROM python:3.10-slim
+FROM python:3.7
 
-# Set environment vars
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PORT 8082
+ENV HOSTDIR 0.0.0.0
 
-# Set working directory
+EXPOSE 8082
+
+RUN apt-get update -y && \
+    apt-get install -y python3-pip
+
+COPY ./requirements.txt /app/requirements.txt
+
 WORKDIR /app
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
-# Copy app files
-COPY . .
+COPY . /app
 
-# Expose port and run app
-EXPOSE 8082
-CMD ["python", "app.py"]
+
+ENTRYPOINT ["python", "app.py"]
