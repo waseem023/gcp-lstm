@@ -118,9 +118,9 @@ def forecast():
 
     # ----------------------------------------------------------------
     # image names & paths
-    BASE_IMAGE_PATH    = 'https://storage.googleapis.com/forecasting_cloud/'
+    BASE_IMAGE_PATH    = 'https://storage.googleapis.com/forecasting-lstm-images/'
     LOCAL_IMAGE_PATH   = "static/images/"
-    BUCKET_NAME        = 'forecasting_cloud'
+    BUCKET_NAME        = 'forecasting-lstm-images'
 
     loss_img  = f"model_loss_{series_col}_{repo_name}.png"
     lstm_img  = f"lstm_generated_data_{series_col}_{repo_name}.png"
