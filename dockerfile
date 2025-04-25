@@ -1,9 +1,9 @@
 FROM python:3.7
 
-ENV PORT 8082
+ENV PORT 8080
 ENV HOSTDIR 0.0.0.0
 
-EXPOSE 8082
+EXPOSE 8080
 
 RUN apt-get update -y && \
     apt-get install -y python3-pip
