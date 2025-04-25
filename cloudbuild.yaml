@@ -10,7 +10,7 @@ steps:
         "--platform=linux/amd64",
         "--push",
         "-t",
-        "gcr.io/flaskhelloworldapp-457805/flask-app:$COMMIT_SHA",
+        "gcr.io/flaskhelloworldapp-457805/lstm-app:$COMMIT_SHA",
         ".",
       ]
 
@@ -22,7 +22,7 @@ steps:
         "deploy",
         "lstm-app",
         "--image",
-        "gcr.io/flaskhelloworldapp-457805/flask-app:$COMMIT_SHA",
+        "gcr.io/flaskhelloworldapp-457805/lstm-app:$COMMIT_SHA",
         "--region",
         "us-central1",
         "--platform",
@@ -31,4 +31,4 @@ steps:
       ]
 
 images:
-  - "gcr.io/flaskhelloworldapp-457805/flask-app:$COMMIT_SHA"
+  - "gcr.io/flaskhelloworldapp-457805/lstm-app:$COMMIT_SHA"
