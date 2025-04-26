@@ -24,145 +24,70 @@ from sklearn.preprocessing import MinMaxScaler
 # Import required storage package from Google Cloud Storage
 from google.cloud import storage
 from statsmodels.tsa.statespace.sarimax import SARIMAX
-
-
-
-
-from flask import Flask, jsonify, request, make_response
-import os
-import pandas as pd
-import numpy as np
-import time
-from dateutil import *
-from datetime import timedelta
-from flask_cors import CORS
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib.ticker import StrMethodFormatter
-from prophet import Prophet
-from google.cloud import storage
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dropout, Dense, Input
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.callbacks import EarlyStopping
-from sklearn.preprocessing import MinMaxScaler
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-
-# Flask app initialization
+# Init flask app
 app = Flask(__name__)
 CORS(app)
 
-# Google Cloud Storage client initialization
-gcs_client = storage.Client()
+# Init Google Cloud Storage client
+client = storage.Client()
 
-# Constants
-GCS_BUCKET_NAME = 'forecasting-lstm-images'
-BASE_IMAGE_URL = 'https://storage.googleapis.com/forecasting-lstm-images/'
-LOCAL_IMAGE_DIR = 'static/images/'
+def build_preflight_response():
+    resp = make_response()
+    resp.headers.add("Access-Control-Allow-Origin", "*")
+    resp.headers.add("Access-Control-Allow-Headers", "Content-Type")
+    resp.headers.add("Access-Control-Allow-Methods", "PUT, GET, POST, DELETE, OPTIONS")
+    return resp
 
-# CORS handling
-def prepare_cors_response():
-    response = make_response()
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-    response.headers.add("Access-Control-Allow-Methods", "PUT, GET, POST, DELETE, OPTIONS")
-    return response
-
-def add_cors_headers(response):
+def build_actual_response(response):
     response.headers.set("Access-Control-Allow-Origin", "*")
     response.headers.set("Access-Control-Allow-Methods", "PUT, GET, POST, DELETE, OPTIONS")
     return response
 
-# Utility to create dataset from time series
-def generate_dataset(sequence, look_back=30):
-    X, y = [], []
-    for i in range(len(sequence) - look_back):
-        X.append(sequence[i:i+look_back, 0])
-        y.append(sequence[i+look_back, 0])
-    return np.array(X), np.array(y)
-
-# Upload local image to Google Cloud Storage
-def upload_to_gcs(file_name):
-    bucket = gcs_client.get_bucket(GCS_BUCKET_NAME)
-    blob = bucket.blob(file_name)
-    blob.upload_from_filename(f"{LOCAL_IMAGE_DIR}{file_name}")
-
-# Create and save loss plot
-def save_loss_plot(history, file_name, title):
-    plt.figure(figsize=(8, 4))
-    plt.plot(history.history['loss'], label='Train Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.title(f'Model Loss - {title}')
-    plt.ylabel('Loss')
-    plt.xlabel('Epoch')
-    plt.legend()
-    plt.savefig(LOCAL_IMAGE_DIR + file_name)
-    plt.close()
-
-# Create and save LSTM predictions plot
-def save_lstm_forecast_plot(Y_train, Y_test, predictions, file_name, title):
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(np.arange(len(Y_train)), Y_train, 'g', label="Training Data")
-    ax.plot(np.arange(len(Y_train), len(Y_train) + len(Y_test)), Y_test, 'b', marker='.', label="Actual Data")
-    ax.plot(np.arange(len(Y_train), len(Y_train) + len(Y_test)), predictions, 'r', label="Predicted Data")
-    ax.set_title(f'LSTM Forecast - {title}')
-    ax.set_xlabel('Time Steps')
-    ax.set_ylabel('Scaled Values')
-    ax.legend()
-    fig.savefig(LOCAL_IMAGE_DIR + file_name)
-    plt.close(fig)
-
-# Create and save time series actual data plot
-def save_actual_data_plot(all_days, Ys, file_name, title):
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(all_days, Ys, marker='.', label=title)
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.AutoDateFormatter(ax.xaxis.get_major_locator()))
-    ax.set_title(f'All {title} Data')
-    ax.set_xlabel('Date')
-    ax.set_ylabel('Count')
-    fig.savefig(LOCAL_IMAGE_DIR + file_name)
-    plt.close(fig)
-
-# Other functions (Prophet plot, SARIMAX plot, Forecast APIs, etc.) 
-# will continue here...
 
 @app.route('/api/forecast', methods=['POST'])
-def predict_issue_forecast():
-    payload = request.get_json()
-    issues = payload["issues"]
-    forecast_type = payload["type"]
-    repository_name = payload["repo"]
+def forecast():
+    body = request.get_json()
+    issues = body["issues"]
+    series_col = body["type"]
+    repo_name = body["repo"]
 
-    issues_df = pd.DataFrame(issues).groupby([forecast_type], as_index=False).count()[[forecast_type, 'issue_number']]
-    issues_df = issues_df.rename(columns={forecast_type: 'ds', 'issue_number': 'y'})
-    issues_df['ds'] = pd.to_datetime(issues_df['ds'])
+    df = pd.DataFrame(issues) \
+        .groupby([series_col], as_index=False) \
+        .count()[[series_col, 'issue_number']] \
+        .rename(columns={series_col: 'ds', 'issue_number': 'y'})
+    df['ds'] = pd.to_datetime(df['ds'])
 
-    first_date = issues_df['ds'].min()
-    last_date = issues_df['ds'].max()
-    all_dates = pd.date_range(start=first_date, end=last_date, freq='D')
+    first_day = df['ds'].min()
+    last_day = df['ds'].max()
+    all_days = pd.date_range(start=first_day, end=last_day, freq='D')
 
-    issue_counts = np.zeros(len(all_dates), dtype=float)
-    for dt, count in zip(issues_df['ds'], issues_df['y']):
-        idx = (dt - first_date).days
-        issue_counts[idx] = count
+    Ys = np.zeros(len(all_days), dtype=float)
+    for dt, y in zip(df['ds'], df['y']):
+        idx = (dt - first_day).days
+        Ys[idx] = y
 
     scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_counts = scaler.fit_transform(issue_counts.reshape(-1, 1))
+    Ys_scaled = scaler.fit_transform(Ys.reshape(-1, 1))
 
-    train_size = int(len(scaled_counts) * 0.8)
-    train_set, test_set = scaled_counts[:train_size], scaled_counts[train_size:]
+    train_size = int(len(Ys_scaled) * 0.8)
+    train, test = Ys_scaled[:train_size], Ys_scaled[train_size:]
 
-    X_train, Y_train = generate_dataset(train_set, 30)
-    X_test, Y_test = generate_dataset(test_set, 30)
+    def create_dataset(arr, look_back=30):
+        X, Y = [], []
+        for i in range(len(arr) - look_back):
+            X.append(arr[i:i+look_back, 0])
+            Y.append(arr[i+look_back, 0])
+        return np.array(X), np.array(Y)
+
+    look_back = 30
+    X_train, Y_train = create_dataset(train, look_back)
+    X_test, Y_test = create_dataset(test, look_back)
 
     X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
     X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
 
     model = Sequential([
-        LSTM(100, input_shape=(1, 30)),
+        LSTM(100, input_shape=(1, look_back)),
         Dropout(0.2),
         Dense(1)
     ])
@@ -178,188 +103,346 @@ def predict_issue_forecast():
         shuffle=False
     )
 
-    # Save plots
-    loss_plot_name = f"model_loss_{forecast_type}_{repository_name}.png"
-    lstm_plot_name = f"lstm_generated_data_{forecast_type}_{repository_name}.png"
-    actual_plot_name = f"all_issues_data_{forecast_type}_{repository_name}.png"
+    BASE_IMAGE_PATH = 'https://storage.googleapis.com/forecasting-lstm-images/'
+    LOCAL_IMAGE_PATH = "static/images/"
+    BUCKET_NAME = 'forecasting-lstm-images'
 
-    save_loss_plot(history, loss_plot_name, forecast_type)
-    predictions = model.predict(X_test)
-    save_lstm_forecast_plot(Y_train, Y_test, predictions, lstm_plot_name, forecast_type)
-    save_actual_data_plot(all_dates, issue_counts, actual_plot_name, 'Issues')
+    loss_img = f"model_loss_{series_col}_{repo_name}.png"
+    lstm_img = f"lstm_generated_data_{series_col}_{repo_name}.png"
+    all_img = f"all_issues_data_{series_col}_{repo_name}.png"
 
-    # Upload images
-    for img_name in [loss_plot_name, lstm_plot_name, actual_plot_name]:
-        upload_to_gcs(img_name)
+    loss_url = BASE_IMAGE_PATH + loss_img
+    lstm_url = BASE_IMAGE_PATH + lstm_img
+    all_url = BASE_IMAGE_PATH + all_img
 
-    # Prophet Forecast
+    plt.figure(figsize=(8, 4))
+    plt.plot(history.history['loss'], label='Train Loss')
+    plt.plot(history.history['val_loss'], label='Test Loss')
+    plt.title('Model Loss For ' + series_col)
+    plt.ylabel('Loss'); plt.xlabel('Epochs'); plt.legend()
+    plt.savefig(LOCAL_IMAGE_PATH + loss_img)
+    plt.close()
+
+    y_pred = model.predict(X_test)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(np.arange(len(Y_train)), Y_train, 'g', label="history")
+    ax.plot(np.arange(len(Y_train), len(Y_train) + len(Y_test)), Y_test, marker='.', label="true")
+    ax.plot(np.arange(len(Y_train), len(Y_train) + len(Y_test)), y_pred, 'r', label="prediction")
+    ax.set_title('LSTM Generated Data For ' + series_col)
+    ax.set_xlabel('Time Steps')
+    ax.set_ylabel('Scaled Issues')
+    ax.legend()
+    fig.savefig(LOCAL_IMAGE_PATH + lstm_img)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(all_days, Ys, marker='.', label='issues')
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.AutoDateFormatter(ax.xaxis.get_major_locator()))
+    ax.set_title('All Issues Data')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Count')
+    fig.savefig(LOCAL_IMAGE_PATH + all_img)
+    plt.close(fig)
+
+    # ----------------------------------------------------------------
+    # Facebook Prophet Forecast
+    prophet_img = f"prophet_forecast_{series_col}_{repo_name}.png"
+    prophet_url = BASE_IMAGE_PATH + prophet_img
     prophet_generated = False
-    prophet_plot_name = f"prophet_forecast_{forecast_type}_{repository_name}.png"
-    try:
-        if len(issues_df) >= 10:
+
+    if len(df) >= 10:  # ✅ Safety check for Prophet
+        try:
             prophet_model = Prophet()
-            prophet_model.fit(issues_df)
+            prophet_model.fit(df)
             future = prophet_model.make_future_dataframe(periods=30)
             forecast = prophet_model.predict(future)
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(issues_df['ds'], issues_df['y'], 'bo-', label='Actual Data')
-            ax.plot(forecast['ds'], forecast['yhat'], 'orange', linestyle='--', label='Forecasted')
-            ax.fill_between(forecast['ds'], forecast['yhat_lower'], forecast['yhat_upper'], color='orange', alpha=0.3)
-            ax.set_title(f"Prophet Forecast for {repository_name}")
-            ax.set_xlabel('Date')
-            ax.set_ylabel('Issue Count')
-            ax.legend()
-            fig.savefig(LOCAL_IMAGE_DIR + prophet_plot_name)
-            plt.close(fig)
-            upload_to_gcs(prophet_plot_name)
-            prophet_generated = True
-    except Exception as e:
-        print(f"Skipping Prophet: {str(e)}")
 
-    # SARIMAX Forecast
-    sarimax_plot_name = f"sarimax_forecast_{forecast_type}_{repository_name}.png"
-    try:
-        df_sarimax = issues_df.set_index('ds').resample('D').sum().fillna(0)
-        sarimax_model = SARIMAX(df_sarimax['y'],
-                                order=(1, 1, 1),
-                                seasonal_order=(1, 1, 1, 7),
-                                enforce_stationarity=False,
-                                enforce_invertibility=False)
-        sarimax_result = sarimax_model.fit(disp=False)
-        sarimax_forecast = sarimax_result.get_forecast(steps=30)
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(df_sarimax.index, df_sarimax['y'], 'bo-', label='Actual')
-        ax.plot(sarimax_forecast.predicted_mean.index, sarimax_forecast.predicted_mean, 'orange', linestyle='--', label='Forecasted')
-        ax.fill_between(sarimax_forecast.predicted_mean.index,
-                        sarimax_forecast.conf_int().iloc[:, 0],
-                        sarimax_forecast.conf_int().iloc[:, 1],
-                        color='orange', alpha=0.3)
-        ax.set_title(f"SARIMAX Forecast for {repository_name}")
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Issue Count')
-        ax.legend()
-        fig.savefig(LOCAL_IMAGE_DIR + sarimax_plot_name)
-        plt.close(fig)
-        upload_to_gcs(sarimax_plot_name)
-    except Exception as e:
-        print(f"Skipping SARIMAX: {str(e)}")
+            cutoff_date = df['ds'].max()
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(df['ds'], df['y'], 'bo-', label='Historical Data')
+
+            future_forecast = forecast[forecast['ds'] > cutoff_date]
+            ax.plot(future_forecast['ds'], future_forecast['yhat'], 'orange', linestyle='--', label='Forecasted Data')
+            ax.fill_between(future_forecast['ds'],
+                            future_forecast['yhat_lower'],
+                            future_forecast['yhat_upper'],
+                            color='orange', alpha=0.3)
+
+            pretty_label = "Created Issues" if "created" in series_col.lower() else "Closed Issues"
+            ax.set_title(f"Forecast of {pretty_label} — {repo_name}", fontsize=14)
+            ax.set_xlabel("Date")
+            ax.set_ylabel(f"Number of {pretty_label}")
+            ax.legend()
+
+            fig.savefig(LOCAL_IMAGE_PATH + prophet_img)
+            plt.close(fig)
+            prophet_generated = True
+        except Exception as e:
+            print(f"Skipping Prophet for {repo_name}: {str(e)}")
+    else:
+        print(f"Skipping Prophet: Not enough data points for {repo_name}.")
+
+    # ----------------------------------------------------------------
+    # Statsmodels SARIMAX Forecast
+    sarimax_img = f"sarimax_forecast_{series_col}_{repo_name}.png"
+    sarimax_url = BASE_IMAGE_PATH + sarimax_img
+
+    df_sarimax = df.set_index('ds').resample('D').sum().fillna(0)
+
+    model = SARIMAX(
+        df_sarimax['y'],
+        order=(1, 1, 1),
+        seasonal_order=(1, 1, 1, 7),
+        enforce_stationarity=False,
+        enforce_invertibility=False
+    )
+    results = model.fit(disp=False)
+
+    forecast_result = results.get_forecast(steps=30)
+    forecast_mean = forecast_result.predicted_mean
+    forecast_ci = forecast_result.conf_int()
+    forecast_index = forecast_mean.index
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(df_sarimax.index, df_sarimax['y'], 'bo-', label='Historical Data')
+    ax.plot(forecast_index, forecast_mean, 'orange', linestyle='--', label='Forecasted Data')
+    ax.fill_between(forecast_index,
+                    forecast_ci.iloc[:, 0],
+                    forecast_ci.iloc[:, 1],
+                    color='orange', alpha=0.3)
+
+    pretty_label = "Created Issues" if "created" in series_col.lower() else "Closed Issues"
+    ax.set_title(f"STATSmodels SARIMAX Forecast of {pretty_label} — {repo_name}", fontsize=14)
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"Number of {pretty_label}")
+    ax.legend()
+
+    fig.savefig(LOCAL_IMAGE_PATH + sarimax_img)
+    plt.close(fig)
+
+    # Upload to GCS
+    bucket = client.get_bucket(BUCKET_NAME)
+    for img in [loss_img, lstm_img, all_img, sarimax_img] + ([prophet_img] if prophet_generated else []):
+        blob = bucket.blob(img)
+        blob.upload_from_filename(f"{LOCAL_IMAGE_PATH}{img}")
 
     return jsonify({
-        "model_loss_image_url": BASE_IMAGE_URL + loss_plot_name,
-        "lstm_generated_image_url": BASE_IMAGE_URL + lstm_plot_name,
-        "all_issues_data_image": BASE_IMAGE_URL + actual_plot_name,
-        "prophet_forecast_image_url": BASE_IMAGE_URL + prophet_plot_name if prophet_generated else None,
-        "sarimax_forecast_image_url": BASE_IMAGE_URL + sarimax_plot_name
+        "model_loss_image_url": loss_url,
+        "lstm_generated_image_url": lstm_url,
+        "all_issues_data_image": all_url,
+        "prophet_forecast_image_url": prophet_url if prophet_generated else None,
+        "sarimax_forecast_image_url": sarimax_url
     })
-
 @app.route('/api/forecast/pulls', methods=['POST'])
-def predict_pull_requests_forecast():
-    payload = request.get_json()
-    pulls = payload["pulls"]
-    repository_name = payload["repo"]
+def forecast_pulls():
+    body = request.get_json()
+    pulls = body["pulls"]
+    repo_name = body["repo"]
 
-    pulls_df = pd.DataFrame(pulls).groupby(['created_at'], as_index=False).count()[['created_at', 'pull_number']]
-    pulls_df = pulls_df.rename(columns={'created_at': 'ds', 'pull_number': 'y'})
-    pulls_df['ds'] = pd.to_datetime(pulls_df['ds'])
+    df = pd.DataFrame(pulls).groupby(['created_at'], as_index=False).count()[['created_at', 'pull_number']] \
+                            .rename(columns={'created_at': 'ds', 'pull_number': 'y'})
+    df['ds'] = pd.to_datetime(df['ds'])
 
-    if pulls_df.shape[0] < 2:
-        return jsonify({
-            "model_loss_image_url": None,
-            "lstm_generated_image_url": None,
-            "all_pulls_data_image": None,
-            "prophet_forecast_image_url": None,
-            "sarimax_forecast_image_url": None
-        })
+    first_day = df['ds'].min()
+    last_day = df['ds'].max()
+    all_days = pd.date_range(start=first_day, end=last_day, freq='D')
 
-    first_date = pulls_df['ds'].min()
-    last_date = pulls_df['ds'].max()
-    all_dates = pd.date_range(start=first_date, end=last_date, freq='D')
-
-    pull_counts = np.zeros(len(all_dates), dtype=float)
-    for dt, count in zip(pulls_df['ds'], pulls_df['y']):
-        idx = (dt - first_date).days
-        pull_counts[idx] = count
+    Ys = np.zeros(len(all_days), dtype=float)
+    for dt, y in zip(df['ds'], df['y']):
+        idx = (dt - first_day).days
+        Ys[idx] = y
 
     scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_counts = scaler.fit_transform(pull_counts.reshape(-1, 1))
+    Ys_scaled = scaler.fit_transform(Ys.reshape(-1, 1))
 
-    train_size = int(len(scaled_counts) * 0.8)
-    train_set, test_set = scaled_counts[:train_size], scaled_counts[train_size:]
+    train_size = int(len(Ys_scaled) * 0.8)
+    train, test = Ys_scaled[:train_size], Ys_scaled[train_size:]
 
-    X_train, Y_train = generate_dataset(train_set, 30)
-    X_test, Y_test = generate_dataset(test_set, 30)
+    def create_dataset(arr, look_back=30):
+        X, Y = [], []
+        for i in range(len(arr) - look_back):
+            X.append(arr[i:i+look_back, 0])
+            Y.append(arr[i+look_back, 0])
+        return np.array(X), np.array(Y)
 
-    if X_train.shape[0] == 0 or X_test.shape[0] == 0:
-        return jsonify({
-            "model_loss_image_url": None,
-            "lstm_generated_image_url": None,
-            "all_pulls_data_image": None,
-            "prophet_forecast_image_url": None,
-            "sarimax_forecast_image_url": None
-        })
+    look_back = 30
+    X_train, Y_train = create_dataset(train, look_back)
+    X_test, Y_test = create_dataset(test, look_back)
 
-    X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
-    X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+    BASE_IMAGE_PATH = 'https://storage.googleapis.com/forecasting-lstm-images/'
+    LOCAL_IMAGE_PATH = "static/images/"
+    BUCKET_NAME = 'forecasting-lstm-images'
 
-    model = Sequential([
-        LSTM(100, input_shape=(1, 30)),
-        Dropout(0.2),
-        Dense(1)
-    ])
-    model.compile(loss='mean_squared_error', optimizer='adam')
+    loss_img = f"model_loss_pulls_{repo_name}.png"
+    lstm_img = f"lstm_generated_data_pulls_{repo_name}.png"
+    all_img = f"all_pulls_data_{repo_name}.png"
+    prophet_img = f"prophet_forecast_pulls_{repo_name}.png"
+    sarimax_img = f"sarimax_forecast_pulls_{repo_name}.png"
 
-    history = model.fit(
-        X_train, Y_train,
-        epochs=20,
-        batch_size=70,
-        validation_data=(X_test, Y_test),
-        callbacks=[EarlyStopping(monitor='val_loss', patience=10)],
-        verbose=1,
-        shuffle=False
+    loss_url = BASE_IMAGE_PATH + loss_img
+    lstm_url = BASE_IMAGE_PATH + lstm_img
+    all_url = BASE_IMAGE_PATH + all_img
+    prophet_url = BASE_IMAGE_PATH + prophet_img
+    sarimax_url = BASE_IMAGE_PATH + sarimax_img
+
+    if X_train.shape[0] > 0 and X_test.shape[0] > 0:
+        X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
+        X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+
+        model = Sequential([
+            LSTM(100, input_shape=(1, look_back)),
+            Dropout(0.2),
+            Dense(1)
+        ])
+        model.compile(loss='mean_squared_error', optimizer='adam')
+
+        history = model.fit(
+            X_train, Y_train,
+            epochs=20,
+            batch_size=70,
+            validation_data=(X_test, Y_test),
+            callbacks=[EarlyStopping(monitor='val_loss', patience=10)],
+            verbose=1,
+            shuffle=False
+        )
+
+        plt.figure(figsize=(8, 4))
+        plt.plot(history.history['loss'], label='Train Loss')
+        plt.plot(history.history['val_loss'], label='Test Loss')
+        plt.title('Model Loss For Pull Requests')
+        plt.ylabel('Loss')
+        plt.xlabel('Epochs')
+        plt.legend()
+        plt.savefig(LOCAL_IMAGE_PATH + loss_img)
+        plt.close()
+
+        y_pred = model.predict(X_test)
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(np.arange(len(Y_train)), Y_train, 'g', label="history")
+        ax.plot(np.arange(len(Y_train), len(Y_train) + len(Y_test)), Y_test, marker='.', label="true")
+        ax.plot(np.arange(len(Y_train), len(Y_train) + len(Y_test)), y_pred, 'r', label="prediction")
+        ax.set_title('LSTM Generated Data For Pull Requests')
+        ax.set_xlabel('Time Steps')
+        ax.set_ylabel('Scaled Pull Requests')
+        ax.legend()
+        fig.savefig(LOCAL_IMAGE_PATH + lstm_img)
+        plt.close(fig)
+    else:
+        print(f"Skipping LSTM training for {repo_name}: not enough pull request data.")
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(all_days, Ys, marker='.', label='Pull Requests')
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.AutoDateFormatter(ax.xaxis.get_major_locator()))
+    ax.set_title('All Pull Requests Data')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Count')
+    fig.savefig(LOCAL_IMAGE_PATH + all_img)
+    plt.close(fig)
+
+    # ------------------------------
+    # Facebook Prophet Forecast
+    prophet_generated = False
+
+    if len(df) >= 10:
+        try:
+            prophet_model = Prophet()
+            prophet_model.fit(df)
+            future = prophet_model.make_future_dataframe(periods=30)
+            forecast = prophet_model.predict(future)
+
+            cutoff_date = df['ds'].max()
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(df['ds'], df['y'], 'bo-', label='Historical Pull Requests')
+            future_forecast = forecast[forecast['ds'] > cutoff_date]
+            ax.plot(future_forecast['ds'], future_forecast['yhat'], 'orange', linestyle='--', label='Forecasted Pull Requests')
+            ax.fill_between(future_forecast['ds'], future_forecast['yhat_lower'], future_forecast['yhat_upper'], color='orange', alpha=0.3)
+            ax.set_title(f"Facebook Prophet Forecast of Pull Requests — {repo_name}", fontsize=14)
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Number of Pull Requests")
+            ax.legend()
+            fig.savefig(LOCAL_IMAGE_PATH + prophet_img)
+            plt.close(fig)
+            prophet_generated = True
+        except Exception as e:
+            print(f"Skipping Prophet for {repo_name}: {str(e)}")
+    else:
+        print(f"Skipping Prophet: Not enough data points for {repo_name}.")
+
+    # ------------------------------
+    # SARIMAX Forecast
+    df_sarimax = df.set_index('ds').resample('D').sum().fillna(0)
+
+    model = SARIMAX(
+        df_sarimax['y'],
+        order=(1, 1, 1),
+        seasonal_order=(1, 1, 1, 7),
+        enforce_stationarity=False,
+        enforce_invertibility=False
     )
+    results = model.fit(disp=False)
 
-    # Save plots
-    loss_plot_name = f"model_loss_pulls_{repository_name}.png"
-    lstm_plot_name = f"lstm_generated_data_pulls_{repository_name}.png"
-    actual_plot_name = f"all_pulls_data_{repository_name}.png"
+    forecast_result = results.get_forecast(steps=30)
+    forecast_mean = forecast_result.predicted_mean
+    forecast_ci = forecast_result.conf_int()
+    forecast_index = forecast_mean.index
 
-    save_loss_plot(history, loss_plot_name, "Pulls")
-    predictions = model.predict(X_test)
-    save_lstm_forecast_plot(Y_train, Y_test, predictions, lstm_plot_name, "Pulls")
-    save_actual_data_plot(all_dates, pull_counts, actual_plot_name, "Pull Requests")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(df_sarimax.index, df_sarimax['y'], 'bo-', label='Historical Pull Requests')
+    ax.plot(forecast_index, forecast_mean, 'orange', linestyle='--', label='Forecasted Pull Requests')
+    ax.fill_between(forecast_index,
+                    forecast_ci.iloc[:, 0],
+                    forecast_ci.iloc[:, 1],
+                    color='orange', alpha=0.3)
+    ax.set_title(f"STATSmodels SARIMAX Forecast of Pull Requests — {repo_name}", fontsize=14)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Number of Pull Requests")
+    ax.legend()
+    fig.savefig(LOCAL_IMAGE_PATH + sarimax_img)
+    plt.close(fig)
 
-    for img_name in [loss_plot_name, lstm_plot_name, actual_plot_name]:
-        upload_to_gcs(img_name)
-
-    # Prophet and SARIMAX can be added same way if needed (optional)
+    # ------------------------------
+    # Upload only generated files
+    bucket = client.get_bucket(BUCKET_NAME)
+    for img in [loss_img, lstm_img, all_img, sarimax_img] + ([prophet_img] if prophet_generated else []):
+        local_path = os.path.join(LOCAL_IMAGE_PATH, img)
+        if os.path.exists(local_path):
+            blob = bucket.blob(img)
+            blob.upload_from_filename(local_path)
+        else:
+            print(f"Skipping upload for {img}, file does not exist.")
 
     return jsonify({
-        "model_loss_image_url": BASE_IMAGE_URL + loss_plot_name,
-        "lstm_generated_image_url": BASE_IMAGE_URL + lstm_plot_name,
-        "all_pulls_data_image": BASE_IMAGE_URL + actual_plot_name,
-        "prophet_forecast_image_url": None,
-        "sarimax_forecast_image_url": None
+        "model_loss_image_url": loss_url if os.path.exists(os.path.join(LOCAL_IMAGE_PATH, loss_img)) else None,
+        "lstm_generated_image_url": lstm_url if os.path.exists(os.path.join(LOCAL_IMAGE_PATH, lstm_img)) else None,
+        "all_pulls_data_image": all_url,
+        "prophet_forecast_image_url": prophet_url if prophet_generated else None,
+        "sarimax_forecast_image_url": sarimax_url
     })
-
 
 @app.route('/api/forecast/branches', methods=['POST'])
-def predict_branches_forecast():
-    payload = request.get_json()
-    branches = payload["branches"]
-    repository_name = payload["repo"]
+def forecast_branches():
+    body = request.get_json()
+    branches = body.get('branches')
+    repo_name = body.get('repo')
 
-    branches_df = pd.DataFrame(branches)
+    df = pd.DataFrame(branches)
 
     today = pd.Timestamp.today()
-    if branches_df['created_at'].nunique() <= 1:
-        branches_df = branches_df.sort_values('branch_name')
-        branches_df['created_at'] = [(today - pd.Timedelta(days=i)).strftime("%Y-%m-%d") for i in range(len(branches_df))]
+    if df['created_at'].nunique() <= 1:
+        df = df.sort_values('branch_name')
+        df['created_at'] = [(today - pd.Timedelta(days=i)).strftime("%Y-%m-%d") for i in range(len(df))]
 
-    branches_df = branches_df.groupby(['created_at'], as_index=False).count()[['created_at', 'branch_name']]
-    branches_df = branches_df.rename(columns={'created_at': 'ds', 'branch_name': 'y'})
-    branches_df['ds'] = pd.to_datetime(branches_df['ds'])
+    df = df.groupby(['created_at'], as_index=False).count()[['created_at', 'branch_name']] \
+           .rename(columns={'created_at': 'ds', 'branch_name': 'y'})
+    df['ds'] = pd.to_datetime(df['ds'])
 
-    if branches_df.shape[0] < 2:
+    if df.shape[0] < 2 or df['y'].sum() == 0:
+        print(f"Skipping branch forecast for {repo_name}: not enough data.")
         return jsonify({
             "model_loss_image_url": None,
             "lstm_generated_image_url": None,
@@ -368,168 +451,296 @@ def predict_branches_forecast():
             "sarimax_forecast_image_url": None
         })
 
-    first_date = branches_df['ds'].min()
-    last_date = branches_df['ds'].max()
-    all_dates = pd.date_range(start=first_date, end=last_date, freq='D')
+    first_day = df['ds'].min()
+    last_day = df['ds'].max()
+    all_days = pd.date_range(start=first_day, end=last_day, freq='D')
 
-    branch_counts = np.zeros(len(all_dates), dtype=float)
-    for dt, count in zip(branches_df['ds'], branches_df['y']):
-        idx = (dt - first_date).days
-        branch_counts[idx] = count
+    Ys = np.zeros(len(all_days), dtype=float)
+    for dt, y in zip(df['ds'], df['y']):
+        idx = (dt - first_day).days
+        Ys[idx] = y
 
     scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_counts = scaler.fit_transform(branch_counts.reshape(-1, 1))
+    Ys_scaled = scaler.fit_transform(Ys.reshape(-1, 1))
 
-    train_size = int(len(scaled_counts) * 0.8)
-    train_set, test_set = scaled_counts[:train_size], scaled_counts[train_size:]
+    train_size = int(len(Ys_scaled) * 0.8)
+    train, test = Ys_scaled[:train_size], Ys_scaled[train_size:]
 
-    X_train, Y_train = generate_dataset(train_set, 30)
-    X_test, Y_test = generate_dataset(test_set, 30)
+    def create_dataset(arr, look_back=30):
+        X, Y = [], []
+        for i in range(len(arr) - look_back):
+            X.append(arr[i:i+look_back, 0])
+            Y.append(arr[i+look_back, 0])
+        return np.array(X), np.array(Y)
 
-    if X_train.shape[0] == 0 or X_test.shape[0] == 0:
-        return jsonify({
-            "model_loss_image_url": None,
-            "lstm_generated_image_url": None,
-            "all_branches_data_image": None,
-            "prophet_forecast_image_url": None,
-            "sarimax_forecast_image_url": None
-        })
+    look_back = 30
+    X_train, Y_train = create_dataset(train, look_back)
+    X_test, Y_test = create_dataset(test, look_back)
 
-    X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
-    X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+    BASE_IMAGE_PATH = 'https://storage.googleapis.com/forecasting-lstm-images/'
+    LOCAL_IMAGE_PATH = "static/images/"
+    BUCKET_NAME = 'forecasting-lstm-images'
 
-    model = Sequential([
-        LSTM(100, input_shape=(1, 30)),
-        Dropout(0.2),
-        Dense(1)
-    ])
-    model.compile(loss='mean_squared_error', optimizer='adam')
+    loss_img = f"model_loss_branches_{repo_name}.png"
+    lstm_img = f"lstm_generated_data_branches_{repo_name}.png"
+    all_img = f"all_branches_data_{repo_name}.png"
+    prophet_img = f"prophet_forecast_branches_{repo_name}.png"
+    sarimax_img = f"sarimax_forecast_branches_{repo_name}.png"
 
-    history = model.fit(
-        X_train, Y_train,
-        epochs=20,
-        batch_size=70,
-        validation_data=(X_test, Y_test),
-        callbacks=[EarlyStopping(monitor='val_loss', patience=10)],
-        verbose=1,
-        shuffle=False
+    loss_url = BASE_IMAGE_PATH + loss_img
+    lstm_url = BASE_IMAGE_PATH + lstm_img
+    all_url = BASE_IMAGE_PATH + all_img
+    prophet_url = BASE_IMAGE_PATH + prophet_img
+    sarimax_url = BASE_IMAGE_PATH + sarimax_img
+
+    # LSTM
+    if X_train.shape[0] > 0 and X_test.shape[0] > 0:
+        X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
+        X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+
+        model = Sequential([
+            LSTM(100, input_shape=(1, look_back)),
+            Dropout(0.2),
+            Dense(1)
+        ])
+        model.compile(loss='mean_squared_error', optimizer='adam')
+
+        history = model.fit(
+            X_train, Y_train,
+            epochs=20,
+            batch_size=70,
+            validation_data=(X_test, Y_test),
+            callbacks=[EarlyStopping(monitor='val_loss', patience=10)],
+            verbose=0,
+            shuffle=False
+        )
+
+        plt.figure(figsize=(8, 4))
+        plt.plot(history.history['loss'], label='Train Loss')
+        plt.plot(history.history['val_loss'], label='Test Loss')
+        plt.title('Model Loss For Branches')
+        plt.ylabel('Loss')
+        plt.xlabel('Epochs')
+        plt.legend()
+        plt.savefig(LOCAL_IMAGE_PATH + loss_img)
+        plt.close()
+
+        y_pred = model.predict(X_test)
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(np.arange(len(Y_train)), Y_train, 'g', label="history")
+        ax.plot(np.arange(len(Y_train), len(Y_train)+len(Y_test)), Y_test, marker='.', label="true")
+        ax.plot(np.arange(len(Y_train), len(Y_train)+len(Y_test)), y_pred, 'r', label="prediction")
+        ax.set_title('LSTM Forecast for Branches')
+        ax.set_xlabel('Time Steps')
+        ax.set_ylabel('Scaled Branches')
+        ax.legend()
+        fig.savefig(LOCAL_IMAGE_PATH + lstm_img)
+        plt.close(fig)
+
+    else:
+        print(f"Skipping LSTM training for {repo_name}: not enough branch data.")
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(all_days, Ys, marker='.', label='Branches')
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.AutoDateFormatter(ax.xaxis.get_major_locator()))
+    ax.set_title('All Branches Data')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Count')
+    fig.savefig(LOCAL_IMAGE_PATH + all_img)
+    plt.close(fig)
+
+    # Facebook Prophet
+    prophet_generated = False
+
+    if len(df) >= 10:
+        try:
+            prophet_model = Prophet()
+            prophet_model.fit(df)
+            future = prophet_model.make_future_dataframe(periods=30)
+            forecast = prophet_model.predict(future)
+
+            cutoff_date = df['ds'].max()
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(df['ds'], df['y'], 'bo-', label='Historical Branches')
+            future_forecast = forecast[forecast['ds'] > cutoff_date]
+            ax.plot(future_forecast['ds'], future_forecast['yhat'], 'orange', linestyle='--', label='Forecasted Branches')
+            ax.fill_between(future_forecast['ds'], future_forecast['yhat_lower'], future_forecast['yhat_upper'], color='orange', alpha=0.3)
+            ax.set_title(f"Facebook Prophet Forecast of Branches — {repo_name}", fontsize=14)
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Number of Branches")
+            ax.legend()
+            fig.savefig(LOCAL_IMAGE_PATH + prophet_img)
+            plt.close(fig)
+            prophet_generated = True
+        except Exception as e:
+            print(f"Skipping Prophet for {repo_name}: {str(e)}")
+    else:
+        print(f"Skipping Prophet: Not enough data points for {repo_name}.")
+
+    # SARIMAX
+    df_sarimax = df.set_index('ds').resample('D').sum().fillna(0)
+
+    model = SARIMAX(
+        df_sarimax['y'],
+        order=(1, 1, 1),
+        seasonal_order=(1, 1, 1, 7),
+        enforce_stationarity=False,
+        enforce_invertibility=False
     )
+    results = model.fit(disp=False)
 
-    # Save plots
-    loss_plot_name = f"model_loss_branches_{repository_name}.png"
-    lstm_plot_name = f"lstm_generated_data_branches_{repository_name}.png"
-    actual_plot_name = f"all_branches_data_{repository_name}.png"
+    forecast_result = results.get_forecast(steps=30)
+    forecast_mean = forecast_result.predicted_mean
+    forecast_ci = forecast_result.conf_int()
+    forecast_index = forecast_mean.index
 
-    save_loss_plot(history, loss_plot_name, "Branches")
-    predictions = model.predict(X_test)
-    save_lstm_forecast_plot(Y_train, Y_test, predictions, lstm_plot_name, "Branches")
-    save_actual_data_plot(all_dates, branch_counts, actual_plot_name, "Branches")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(df_sarimax.index, df_sarimax['y'], 'bo-', label='Historical Branches')
+    ax.plot(forecast_index, forecast_mean, 'orange', linestyle='--', label='Forecasted Branches')
+    ax.fill_between(forecast_index, forecast_ci.iloc[:, 0], forecast_ci.iloc[:, 1], color='orange', alpha=0.3)
+    ax.set_title(f"STATSmodels SARIMAX Forecast of Branches — {repo_name}", fontsize=14)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Number of Branches")
+    ax.legend()
+    fig.savefig(LOCAL_IMAGE_PATH + sarimax_img)
+    plt.close(fig)
 
-    for img_name in [loss_plot_name, lstm_plot_name, actual_plot_name]:
-        upload_to_gcs(img_name)
+    # Upload
+    bucket = client.get_bucket(BUCKET_NAME)
+    for img in [loss_img, lstm_img, all_img, sarimax_img] + ([prophet_img] if prophet_generated else []):
+        local_path = os.path.join(LOCAL_IMAGE_PATH, img)
+        if os.path.exists(local_path):
+            blob = bucket.blob(img)
+            blob.upload_from_filename(local_path)
+        else:
+            print(f"Skipping upload for {img}, file does not exist.")
 
     return jsonify({
-        "model_loss_image_url": BASE_IMAGE_URL + loss_plot_name,
-        "lstm_generated_image_url": BASE_IMAGE_URL + lstm_plot_name,
-        "all_branches_data_image": BASE_IMAGE_URL + actual_plot_name,
-        "prophet_forecast_image_url": None,
-        "sarimax_forecast_image_url": None
+        "model_loss_image_url": loss_url if os.path.exists(os.path.join(LOCAL_IMAGE_PATH, loss_img)) else None,
+        "lstm_generated_image_url": lstm_url if os.path.exists(os.path.join(LOCAL_IMAGE_PATH, lstm_img)) else None,
+        "all_branches_data_image": all_url,
+        "prophet_forecast_image_url": prophet_url if prophet_generated else None,
+        "sarimax_forecast_image_url": sarimax_url
     })
+@app.route('/api/stars', methods=['POST'])
+def plot_stars():
+    body = request.get_json()
+    repos = body["repos"]  # List of {"name": "repo-name", "stars": count}
 
-@app.route('/api/stars', methods=['GET'])
-def generate_star_chart():
-    repositories = [
-        "ollama/ollama",
-        "langchain-ai/langchain",
-        "langchain-ai/langgraph",
-        "microsoft/autogen",
-        "openai/openai-cookbook",
-        "meta-llama/llama3",
-        "elastic/elasticsearch",
-        "milvus-io/pymilvus"
-    ]
+    # Constants
+    BASE_IMAGE_PATH = 'https://storage.googleapis.com/forecasting-lstm-images/'
+    LOCAL_IMAGE_PATH = "static/images/"
+    BUCKET_NAME = 'forecasting-lstm-images'
 
-    github_token = os.getenv('GITHUB_TOKEN', 'GITHUB_TOKEN')
-    headers = {"Authorization": f'token {github_token}'} if github_token else {}
+    # Convert to DataFrame and sort by stars descending
+    df = pd.DataFrame(repos).sort_values(by="stars", ascending=False)
 
-    GITHUB_API_URL = "https://api.github.com/repos/"
+    # Create the bar chart
+    fig, ax = plt.subplots(figsize=(12, 7))
+    bars = ax.bar(df['name'], df['stars'], color='royalblue', edgecolor='black')
 
-    repo_star_data = []
-    for repo_full_name in repositories:
-        url = GITHUB_API_URL + repo_full_name
-        response = requests.get(url, headers=headers)
-        repo_info = response.json()
-        repo_star_data.append({
-            "name": repo_full_name.split("/")[-1],  # Repo name only (not user/org)
-            "stars": repo_info.get("stargazers_count", 0)
-        })
+    # Chart styling
+    ax.set_title("GitHub Stars per Repository", fontsize=18, pad=15)
+    ax.set_xlabel("Repository", fontsize=14)
+    ax.set_ylabel("Number of Stars", fontsize=14)
+    ax.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))
 
-    # Post to LSTM microservice to generate bar chart
-    STAR_CHART_API = "https://lstm-app-708210591622.us-central1.run.app/api/stars"
-    star_chart_response = requests.post(
-        STAR_CHART_API,
-        json={"repos": repo_star_data},
-        headers={'content-type': 'application/json'}
-    )
+    plt.xticks(rotation=45, ha='right', fontsize=12)
+    plt.yticks(fontsize=12)
 
-    if star_chart_response.status_code == 200:
-        return jsonify({
-            "star_bar_chart_url": star_chart_response.json().get("star_bar_chart_url")
-        })
-    else:
-        return jsonify({
-            "error": "Failed to generate star chart"
-        }), 500
-@app.route('/api/forks', methods=['GET'])
-def generate_fork_chart():
-    """
-    Fetches fork counts for multiple GitHub repositories,
-    sends them to the forecasting microservice,
-    and returns the generated bar chart URL.
-    """
-    repositories = [
-        "ollama/ollama",
-        "langchain-ai/langchain",
-        "langchain-ai/langgraph",
-        "microsoft/autogen",
-        "openai/openai-cookbook",
-        "meta-llama/llama3",
-        "elastic/elasticsearch",
-        "milvus-io/pymilvus"
-    ]
+    # Add star counts on top of each bar
+    for bar in bars:
+        height = bar.get_height()
+        ax.annotate(f'{int(height):,}',
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 5),
+                    textcoords="offset points",
+                    ha='center', va='bottom',
+                    fontsize=10, color='black')
 
-    github_token = os.getenv('GITHUB_TOKEN', 'GITHUB_TOKEN')
-    headers = {"Authorization": f'token {github_token}'} if github_token else {}
+    fig.tight_layout()
 
-    GITHUB_API_URL = "https://api.github.com/repos/"
+    # Create a unique filename with timestamp to bust cache
+    timestamp = int(time.time())
+    bar_img = f"repo_stars_bar_chart_{timestamp}.png"
+    bar_url = BASE_IMAGE_PATH + bar_img
+    local_path = os.path.join(LOCAL_IMAGE_PATH, bar_img)
 
-    repo_fork_data = []
-    for repo_full_name in repositories:
-        url = GITHUB_API_URL + repo_full_name
-        response = requests.get(url, headers=headers)
-        repo_info = response.json()
-        repo_fork_data.append({
-            "name": repo_full_name.split("/")[-1],  # Get only the repo name (not organization)
-            "forks": repo_info.get("forks_count", 0)
-        })
+    # Save the image locally
+    fig.savefig(local_path)
+    plt.close(fig)
 
-    # Post fork data to LSTM service
-    FORK_CHART_API = "https://lstm-app-708210591622.us-central1.run.app/api/forks"
-    fork_chart_response = requests.post(
-        FORK_CHART_API,
-        json={"repos": repo_fork_data},
-        headers={'content-type': 'application/json'}
-    )
+    # Upload to Google Cloud Storage
+    client = storage.Client()
+    bucket = client.get_bucket(BUCKET_NAME)
+    blob = bucket.blob(bar_img)
+    blob.upload_from_filename(local_path)
 
-    if fork_chart_response.status_code == 200:
-        return jsonify({
-            "forks_bar_chart_url": fork_chart_response.json().get("forks_bar_chart_url")
-        })
-    else:
-        return jsonify({
-            "error": "Failed to generate forks chart"
-        }), 500
+    # Return the GCS image URL to frontend
+    return jsonify({
+        "star_bar_chart_url": bar_url
+    })
+@app.route('/api/forks', methods=['POST'])
+def plot_forks():
+    from matplotlib.ticker import StrMethodFormatter
+    import time
+
+    body = request.get_json()
+    repos = body["repos"]  # List of {"name": "repo-name", "forks": count}
+
+    BASE_IMAGE_PATH = 'https://storage.googleapis.com/forecasting-lstm-images/'
+    LOCAL_IMAGE_PATH = "static/images/"
+    BUCKET_NAME = 'forecasting-lstm-images'
+
+    # Create DataFrame and sort by forks descending
+    df = pd.DataFrame(repos).sort_values(by="forks", ascending=False)
+
+    # Create the bar chart
+    fig, ax = plt.subplots(figsize=(12, 7))
+    bars = ax.bar(df['name'], df['forks'], color='mediumseagreen', edgecolor='black')
+
+    # Chart styling
+    ax.set_title("GitHub Forks per Repository", fontsize=18, pad=15)
+    ax.set_xlabel("Repository", fontsize=14)
+    ax.set_ylabel("Number of Forks", fontsize=14)
+    ax.yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))
+
+    plt.xticks(rotation=45, ha='right', fontsize=12)
+    plt.yticks(fontsize=12)
+
+    # Value labels on top
+    for bar in bars:
+        height = bar.get_height()
+        ax.annotate(f'{int(height):,}',
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 5),
+                    textcoords="offset points",
+                    ha='center', va='bottom',
+                    fontsize=10, color='black')
+
+    fig.tight_layout()
+
+    # Save with unique timestamp to avoid cache
+    timestamp = int(time.time())
+    bar_img = f"repo_forks_bar_chart_{timestamp}.png"
+    bar_url = BASE_IMAGE_PATH + bar_img
+    local_path = os.path.join(LOCAL_IMAGE_PATH, bar_img)
+
+    # Save locally
+    fig.savefig(local_path)
+    plt.close(fig)
+
+    # Upload to GCS
+    client = storage.Client()
+    bucket = client.get_bucket(BUCKET_NAME)
+    blob = bucket.blob(bar_img)
+    blob.upload_from_filename(local_path)
+
+    return jsonify({
+        "forks_bar_chart_url": bar_url
+    })
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=8082)
-
